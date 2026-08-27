@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibecoding · 1920 × 1920 方形画布（蓝底白窗改色版）</title>
+  <style>
+    :root {
+      --bg: #e8e8e8;
+      --canvas-bg: #f2f2f2;
+      --ink: #2b2b2b;
+      --accent: #555555;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      padding: 24px;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+    .canvas-wrap {
+      background: #fff;
+      padding: 10px;
+      border-radius: 10px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+    }
+    canvas {
+      display: block;
+      background: var(--canvas-bg);
+      border-radius: 4px;
+      cursor: none;                                /* 隐藏默认光标，用自定义魔杖代替 */
+      /* 逻辑画布 1920×1920，位图按 1.5 倍为 2880×2880（超采样更清晰）；
+         这里限定显示尺寸为 1920×1920，使屏幕上量到的中心区恰为 1400×1400 */
+      width: 1920px;
+      height: 1920px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    button {
+      padding: 10px 22px;
+      font-size: 14px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      background: var(--ink);
+      color: #fff;
+      transition: transform 0.08s ease, opacity 0.15s ease;
+    }
+    button:hover { opacity: 0.85; }
+    button:active { transform: scale(0.96); }
+    .hint {
+      font-size: 13px;
+      color: #777;
+    }
+  </style>
+</head>
+<body>
+  <h1>Vibecoding 小作品 · 方形 1920 × 1920 · 蓝底白窗</h1>
+  <div class="canvas-wrap">
+    <canvas id="stage" width="2880" height="2880"></canvas>
+  </div>
+  <div class="toolbar">
+    <button id="btn-regen">🎲 重新随机分割</button>
+    <span class="hint" id="hint">1920 × 1920 · 中心 1400 × 1400 · 不规则分割</span>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('stage');
+    const ctx = canvas.getContext('2d');
+    const SCALE = 1.5;                              // 整体放大倍数（画布内部分辨率已同步放大）
+    const W = 1920;                                 // 逻辑宽（绘制坐标系）
+    const H = 1920;                                 // 逻辑高
+
+    // 画布背景色（浅灰）
+    const CANVAS_BG = '#f2f2f2';
+
+    // 中心生成区域（1400 × 1400），居中放置
+    const AREA = {
+      w: 1400,
+      h: 1400
+    };
+    AREA.x = (W - AREA.w) / 2;
+    AREA.y = (H - AREA.h) / 2;
+
+    // 块的最小尺寸（防止被切得太碎；适当调大以杜绝过小的窗）
+    const MIN_SIZE = 200;
+
+    // 长宽比上限：超过此值视为“比例极端”，不允许产生
+    const MAX_RATIO = 3;
+
+    // 保证存在的大窗：尺寸必须 > 400 × 700（宽 > 400 且 高 > 700）
+    // 不再是固定 400×700，而是随机一个更大的窗，且四周留 >= MIN_SIZE 边距以继续切分
+    const LARGE_MIN_W = 460;                       // 宽下限 > 400
+    const LARGE_MIN_H = 760;                       // 高下限 > 700
+
+    // 块之间的缝隙
+    const GAP = 5;
+
+    // 描边颜色：统一深灰（不加彩色）
+    const STROKE_COLORS = [
+      '#2b2b2b', '#2b2b2b', '#2b2b2b', '#3d3d3d', '#3d3d3d', '#555555'
+    ];
+
+    // 描边线条配置（纯线条轮廓，无需发光、无需填色）
+    const OUTLINE_W_MIN = 3;                     // 窗外轮廓线宽范围
+    const OUTLINE_W_MAX = 5;
+    const STROKE_W_MIN = 1.5;                    // 内部分区线条线宽范围
+    const STROKE_W_MAX = 2.5;
+
+    // 花窗相对矩形的内缩距离
+    const INSET = 10;
+
+    function rand(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    function randInt(min, max) {
+      return Math.floor(rand(min, max));
+    }
+
+    function pick(arr) {
+      return arr[Math.floor(Math.random() * arr.length)];
+    }
+
+    function clearCanvas() {
+      ctx.fillStyle = CANVAS_BG;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // 绘制中心区域的参考虚线框
+    function drawAreaGuide() {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.10)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 6]);
+      ctx.strokeRect(AREA.x, AREA.y, AREA.w, AREA.h);
+      ctx.restore();
+    }
+
+    // 纯线条描边：只用深色线条勾勒轮廓 / 分区，无发光、无填色
+    function strokeLine(drawPath, w) {
+      ctx.save();
+      ctx.strokeStyle = pick(STROKE_COLORS);
+      ctx.lineWidth = w;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      drawPath();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 尝试在某个方向切分，并保证切出两块的比例都不超过 MAX_RATIO
+    // vertical=true：竖切（左右分）；false：横切（上下分）
+    function trySplit(b, vertical) {
+      if (vertical) {
+        if (b.w < MIN_SIZE * 2) return null;
+        // 每块宽必须 >= 对侧边长 / MAX_RATIO，避免产生极端细长的条
+        const minW = Math.max(MIN_SIZE, b.h / MAX_RATIO);
+        const loMax = b.w - minW;
+        if (minW > loMax) return null;
+        const w1 = rand(minW, loMax);
+        return [
+          { x: b.x, y: b.y, w: w1, h: b.h },
+          { x: b.x + w1, y: b.y, w: b.w - w1, h: b.h }
+        ];
+      } else {
+        if (b.h < MIN_SIZE * 2) return null;
+        const minH = Math.max(MIN_SIZE, b.w / MAX_RATIO);
+        const loMax = b.h - minH;
+        if (minH > loMax) return null;
+        const h1 = rand(minH, loMax);
+        return [
+          { x: b.x, y: b.y, w: b.w, h: h1 },
+          { x: b.x, y: b.y + h1, w: b.w, h: b.h - h1 }
+        ];
+      }
+    }
+
+    // 偏竖向分割，但绝不产生比例极端（> MAX_RATIO）的块
+    function splitBlock(b) {
+      const vRes = trySplit(b, true);
+      const hRes = trySplit(b, false);
+      if (vRes && hRes) {
+        // 优先竖向，营造竖向为主的节奏
+        return Math.random() < 0.7 ? vRes : hRes;
+      }
+      return vRes || hRes || null;
+    }
+
+    // 生成随机分割：保证一个“大于 400×700”的大窗 + 其余不规则分割（无极端比例、无过小的窗）
+    function generateSubdivision() {
+      const target = randInt(6, 13);
+
+      // 大窗尺寸：宽 > 400 且 高 > 700；上限受中心区限制，保证四周各留 >= MIN_SIZE 边距
+      const lw = rand(LARGE_MIN_W, AREA.w - MIN_SIZE * 2);
+      const lh = rand(LARGE_MIN_H, AREA.h - MIN_SIZE * 2);
+      const lx = rand(AREA.x + MIN_SIZE, AREA.x + AREA.w - lw - MIN_SIZE);
+      const ly = rand(AREA.y + MIN_SIZE, AREA.y + AREA.h - lh - MIN_SIZE);
+      const large = { x: lx, y: ly, w: lw, h: lh, large: true };
+
+      const blocks = [large];
+      // 大窗四周的“回”字剩余条带（左 / 右 / 上 / 下），继续切分
+      // 左条（整高）
+      if (lx - AREA.x > MIN_SIZE) {
+        blocks.push({ x: AREA.x, y: AREA.y, w: lx - AREA.x, h: AREA.h });
+      }
+      // 右条（整高）
+      if (AREA.x + AREA.w - (lx + lw) > MIN_SIZE) {
+        blocks.push({ x: lx + lw, y: AREA.y, w: AREA.x + AREA.w - (lx + lw), h: AREA.h });
+      }
+      // 上条（仅大窗宽度范围内）
+      if (ly - AREA.y > MIN_SIZE) {
+        blocks.push({ x: lx, y: AREA.y, w: lw, h: ly - AREA.y });
+      }
+      // 下条
+      if (AREA.y + AREA.h - (ly + lh) > MIN_SIZE) {
+        blocks.push({ x: lx, y: ly + lh, w: lw, h: AREA.y + AREA.h - (ly + lh) });
+      }
+
+      // 对剩余块递归分割，优先切最大块，直到达到目标块数（大窗不切）
+      while (blocks.length < target) {
+        let bestIdx = -1, bestArea = -1;
+        for (let i = 0; i < blocks.length; i++) {
+          const b = blocks[i];
+          if (b.large) continue;
+          if (b.w >= MIN_SIZE * 2 || b.h >= MIN_SIZE * 2) {
+            const area = b.w * b.h;
+            if (area > bestArea) { bestArea = area; bestIdx = i; }
+          }
+        }
+        if (bestIdx === -1) break;
+
+        const parts = splitBlock(blocks[bestIdx]);
+        if (!parts) break;
+        blocks.splice(bestIdx, 1, parts[0], parts[1]);
+      }
+
+      return blocks;
+    }
+
+    // （已移除铁艺螺旋：只保留随机分割的窗户轮廓 + 内部分区线）
+
+    // ===== 下雨背景 =====
+    const WALL_COLOR = '#2577ef';                  // 背景/墙面：蓝色
+    const SKY_TOP = '#2577ef';                     // 窗内雨天空：蓝色（与背景同色，靠白窗框区分）
+    const SKY_BOTTOM = '#2577ef';                  // 窗内雨天空：蓝色
+    const RAIN_COLOR = '#ffffff';                  // 雨丝颜色：白色
+    const RAIN_TOTAL = 473;                        // 雨丝总量（再加 30%）
+    const IMG_RATIO = 0.25;                        // 素材雨滴占比（25% 换成图片）
+    const IMG_DIV = 7;                             // 素材图片统一缩放除数：显示尺寸 = 原始像素 ÷ 7（保留各自宽高比，不再用固定 CSS 宽度）
+
+    // 三张素材：星星 / 水滴轮廓 / 实心水滴（彩色 + 灰阶两版，灰阶图已离线生成）
+    const rainImgs = [];                            // 每项: { color: Image, gray: Image }
+    const imgPairs = [
+      ['44.png',    '444.png'],
+      ['55.png',    '555.png']
+    ];
+    let imgsReady = false;
+    (function loadRainImages() {
+      let loaded = 0;
+      const total = imgPairs.length * 2;
+      for (const [colorPath, grayPath] of imgPairs) {
+        const color = new Image();
+        const gray = new Image();
+        color.src = colorPath;
+        gray.src = grayPath;
+        const done = () => {
+          if (++loaded === total) {
+            imgsReady = true;
+            if (blocks.length) initRain();           // 素材就绪后刷新一次，初始布局也能用上图片
+          }
+        };
+        color.onload = done;
+        gray.onload = done;
+        rainImgs.push({ color, gray });
+      }
+    })();
+
+    // ===== 自定义光标：星星魔杖 + 落下的小光点 =====
+    const wandImg = new Image();
+    wandImg.src = '资源 13yu3.png';
+    let wandReady = false;
+    wandImg.onload = () => { wandReady = true; };
+
+    const WAND_SIZE = 48;                            // 魔杖显示大小
+    const MAX_PARTICLES = 30;                        // 最大同时存在的光点数
+    const particles = [];                            // 小光点数组
+
+    // 生成一个从鼠标位置落下的小光点
+    function spawnParticle(x, y) {
+      if (particles.length >= MAX_PARTICLES) return;
+      particles.push({
+        x: x + (Math.random() - 0.5) * 16,
+        y: y,
+        vx: (Math.random() - 0.5) * 0.6,
+        vy: 0.8 + Math.random() * 1.2,
+        r: 1.0 + Math.random() * 1.5,               // 更小的半径
+        alpha: 0.8 + Math.random() * 0.2,
+        life: 120 + Math.random() * 80              // 更长的存活帧数
+      });
+    }
+
+    // 更新并绘制所有光点（每帧调用）
+    function updateAndDrawParticles(mx, my) {
+      ctx.save();
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+        p.alpha *= 0.985;                           // 更慢的渐隐 → 寿命更长
+
+        if (p.life <= 0 || p.alpha < 0.02) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        // 绘制发光小圆点：白色核心 + 白色光晕
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${p.alpha})`;
+        ctx.fill();
+
+        // 外层白色光晕
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * 2.2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255, 255, 255, ${p.alpha * 0.3})`;
+        ctx.fill();
+      }
+      ctx.restore();
+
+      // 每帧有概率在鼠标位置生成新光点
+      if (mx >= 0 && my >= 0 && Math.random() < 0.35) {
+        spawnParticle(mx, my);
+      }
+    }
+
+    // 绘制自定义魔杖光标
+    function drawWandCursor(mx, my) {
+      if (!wandReady || mx < 0 || my < 0) return;
+      ctx.save();
+      const ar = wandImg.naturalHeight / wandImg.naturalWidth || 1;
+      ctx.drawImage(wandImg, mx - WAND_SIZE / 2, my - WAND_SIZE / 2,
+        WAND_SIZE, WAND_SIZE * ar);
+      ctx.restore();
+    }
+
+    let blocks = [];                               // 当前分割（动画中保持稳定）
+
+    // 按窗面积分配雨丝数量，并初始化"每个窗各自"的雨滴（独立下雨）
+    // 约 IMG_RATIO 比例的雨滴使用素材图片代替线条
+    function initRain() {
+      let totalArea = 0;
+      for (const b of blocks) if (b.valid) totalArea += b.rw * b.rh;
+      const density = totalArea > 0 ? RAIN_TOTAL / totalArea : 0;
+      const nImgs = rainImgs.length;
+      for (const b of blocks) {
+        if (!b.valid) { b.drops = []; continue; }
+        const count = Math.max(10, Math.round(b.rw * b.rh * density));
+        const arr = [];
+        for (let i = 0; i < count; i++) {
+          const isImg = nImgs > 0 && Math.random() < IMG_RATIO;
+          arr.push({
+            x: b.rx + Math.random() * b.rw,
+            y: b.ry + Math.random() * b.rh,
+            len: 24 + Math.random() * 44,
+            speed: 6 + Math.random() * 7,
+            isImg: isImg,
+            imgIdx: isImg ? Math.floor(Math.random() * nImgs) : -1
+          });
+        }
+        b.drops = arr;
+      }
+    }
+
+    // 在单个窗内绘制并推进它自己的雨（裁剪在窗形状内，窗与窗互不干扰）
+    // slow: 当前窗是否被悬停（减速 + 保持彩色）；anyHovered: 是否已有某窗被悬停
+    function drawWindowRain(b, slow, anyHovered) {
+      if (!imgsReady) return;                       // 素材未加载完则跳过
+      ctx.save();
+      ctx.beginPath();
+      addOpeningPath(b);
+      ctx.clip();
+
+      // 存在悬停窗时，非悬停窗（灰窗）的雨切换为你提供的灰态图片（444/222/555）；无悬停时全部用彩色图片（44/22/55）
+      const bw = anyHovered && !slow;
+      const spd = slow ? 0.08 : 1;                  // 悬停窗内雨丝减速到 8%（更慢）；灰窗保持原速
+      // 灰窗雨丝用 55a6ff，彩色/悬停窗雨丝用白色；透明度保持原样，图片外观由你提供的两套图片决定
+      const lineColor = bw ? '#55a6ff' : RAIN_COLOR;
+      ctx.globalAlpha = 1;
+
+      for (const d of b.drops) {
+        const sp = d.speed * spd;
+        // 素材图片按各自原始像素 ÷ IMG_DIV 等比缩放（保留原图宽高比），不再用固定 CSS 宽度
+        let drawW = 0, drawH = 0;
+        if (d.isImg && rainImgs[d.imgIdx]) {
+          // 绘制素材图片雨滴：灰窗用你提供的灰态图（444/555），否则用彩色图（44/55）
+          const entry = rainImgs[d.imgIdx];
+          const src = (bw && entry.gray) ? entry.gray : entry.color;
+          drawW = src.naturalWidth / IMG_DIV;
+          drawH = src.naturalHeight / IMG_DIV;
+          ctx.drawImage(src, d.x - drawW / 2, d.y - drawH / 2, drawW, drawH);
+        } else {
+          // 绘制线条雨滴
+          ctx.strokeStyle = lineColor;
+          ctx.lineWidth = 2;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(d.x, d.y);
+          ctx.lineTo(d.x, d.y + d.len);
+          ctx.stroke();
+        }
+        d.y += sp;
+        if (d.y > b.ry + b.rh) {
+          d.y = b.ry - (d.isImg ? drawH : d.len);
+          d.x = b.rx + Math.random() * b.rw;
+        }
+      }
+      ctx.restore();
+    }
+
+    // 窗洞路径：作为子路径追加（不自行 begin / fill）
+    function addOpeningPath(b) {
+      const rx = b.rx, ry = b.ry, rw = b.rw, rh = b.rh, cx = rx + rw / 2;
+      if (b.style === 'rect') {
+        ctx.rect(rx, ry, rw, rh);
+      } else {
+        const midY = ry + rw / 2;
+        ctx.moveTo(rx, ry + rh);
+        ctx.lineTo(rx, midY);
+        ctx.arc(cx, midY, rw / 2, Math.PI, 2 * Math.PI, false);
+        ctx.lineTo(rx + rw, ry + rh);
+        ctx.closePath();
+      }
+    }
+
+    // 2) 墙面：浅灰填充整张画布，挖掉所有窗洞（only 窗内透出雨）
+    function drawWall() {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, H);
+      for (const b of blocks) if (b.valid) addOpeningPath(b);
+      ctx.fillStyle = WALL_COLOR;
+      ctx.fill('evenodd');
+      ctx.restore();
+    }
+
+    // 3) 单个窗户：轮廓线 + 居中十字（裁剪在窗框内）
+    function strokeWindow(b) {
+      ctx.save();
+      ctx.strokeStyle = b.stroke;
+      ctx.lineWidth = b.outlineW;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      addOpeningPath(b);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.beginPath();
+      addOpeningPath(b);
+      ctx.clip();
+      ctx.strokeStyle = b.stroke;
+      ctx.lineWidth = b.crossW;
+      const cx = b.rx + b.rw / 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, b.ry);
+      ctx.lineTo(cx, b.ry + b.rh);
+      ctx.moveTo(b.rx, b.ry + b.rh / 2);
+      ctx.lineTo(b.rx + b.rw, b.ry + b.rh / 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawAllWindows() {
+      for (const b of blocks) if (b.valid) strokeWindow(b);
+    }
+
+    // 悬停窗：窗框内壁一圈淡蓝内发光（裁剪在窗内，不外溢到墙面；先于窗内容绘制 → 窗背后）
+    function drawHoverGlow(b) {
+      ctx.save();
+      // 裁剪在窗开口内，使发光只沿内壁出现，绝不到窗框外
+      ctx.beginPath();
+      addOpeningPath(b);
+      ctx.clip();
+
+      ctx.shadowColor = 'rgba(255, 255, 255, 0.95)';   // 白色发光（蓝底上可见）
+      ctx.shadowBlur = 26 * SCALE;                     // 受变换影响，手动放大
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.lineWidth = 10;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      addOpeningPath(b);
+      ctx.stroke();                                 // 描边在边界，外阴被裁 → 纯净内发光
+
+      ctx.restore();
+    }
+
+    // 每帧：天空底 → 浅灰墙（挖窗）→ 悬停光晕（窗背后）→ 各窗雨 → 窗框 → 魔杖光标 + 光点
+    function render() {
+      ctx.setTransform(SCALE, 0, 0, SCALE, 0, 0);   // 整体放大 1.5 倍（逻辑坐标 1920×1920 → 真实 2880×2880）
+      ctx.fillStyle = SKY_TOP;
+      ctx.fillRect(0, 0, W, H);
+      drawWall();
+      const hov = getHoveredWindow();
+      const anyHovered = !!hov;
+      if (hov) drawHoverGlow(hov);                 // 光晕先于窗内容绘制 → 落在窗背后
+      for (const b of blocks) if (b.valid) drawWindowRain(b, b === hov, anyHovered);
+      drawAllWindows();
+
+      // 自定义光标：魔杖 + 落下的小光点（最上层）
+      updateAndDrawParticles(mouse.x, mouse.y);
+      drawWandCursor(mouse.x, mouse.y);
+
+      requestAnimationFrame(render);
+    }
+
+    // 生成一次分割，并计算每个窗的几何 / 样式 / 线条参数（动画中保持稳定）
+    function drawSubdivision() {
+      blocks = generateSubdivision();
+
+      const archable = [];
+      blocks.forEach((b, i) => {
+        const rw = b.w - INSET * 2;
+        const rh = b.h - INSET * 2;
+        b._rw = rw; b._rh = rh;
+        b._archable = rw > 0 && rh > 0 && (rh - rw / 2 >= 40);
+        if (b._archable) archable.push(i);
+      });
+      const forced = new Set();
+      const pool = archable.slice();
+      for (let k = 0; k < 2 && pool.length; k++) {
+        const idx = Math.floor(Math.random() * pool.length);
+        forced.add(pool.splice(idx, 1)[0]);
+      }
+
+      let archCount = 0;
+      for (let i = 0; i < blocks.length; i++) {
+        const b = blocks[i];
+        const rw = b._rw, rh = b._rh;
+        if (rw <= 0 || rh <= 0) { b.valid = false; continue; }
+        b.valid = true;
+
+        let style;
+        if (!b._archable) style = 'rect';
+        else if (forced.has(i)) style = 'arch';
+        else style = Math.random() < 0.5 ? 'arch' : 'rect';
+
+        b.rx = b.x + INSET; b.ry = b.y + INSET;
+        b.rw = rw; b.rh = rh;
+        b.style = style;
+        b.stroke = '#ffffff';                      // 所有窗框：白色
+        b.outlineW = rand(OUTLINE_W_MIN, OUTLINE_W_MAX);
+        b.crossW = rand(STROKE_W_MIN, STROKE_W_MAX);
+        if (style === 'arch') archCount++;
+      }
+
+      initRain();
+      const largeCount = blocks.filter(b => b.large).length;
+      document.getElementById('hint').textContent =
+        '1920 × 1920 · 中心 1400 × 1400 · 含 ' + largeCount + ' 个 >400×700 大窗 · 本次 ' + blocks.filter(b => b.valid).length + ' 块 · 拱形花窗 ' + archCount + ' 个';
+    }
+
+    // ===== 鼠标悬停：停住窗内雨 =====
+    const mouse = { x: -1, y: -1 };
+    let rightDown = false;                          // 是否按住右键（按住时不触发悬停效果）
+    canvas.addEventListener('mousemove', e => {
+      const rect = canvas.getBoundingClientRect();
+      mouse.x = (e.clientX - rect.left) * (W / rect.width);    // 还原到逻辑坐标（0~1920）
+      mouse.y = (e.clientY - rect.top) * (H / rect.height);
+    });
+    canvas.addEventListener('mouseleave', () => { mouse.x = -1; mouse.y = -1; rightDown = false; });
+    canvas.addEventListener('mousedown', e => { if (e.button === 2) rightDown = true; });
+    canvas.addEventListener('mouseup', e => { if (e.button === 2) rightDown = false; });
+    canvas.addEventListener('contextmenu', e => e.preventDefault());  // 屏蔽右键菜单
+
+    // 返回鼠标当前所在的窗（命中其开口形状），否则 null
+    // 按住右键时不返回任何窗 → 悬停效果（内发光/减速/其余窗灰白）全部不触发
+    function getHoveredWindow() {
+      if (mouse.x < 0 || rightDown) return null;
+      for (const b of blocks) {
+        if (!b.valid) continue;
+        ctx.beginPath();
+        addOpeningPath(b);
+        // isPointInPath 使用不受变换影响的 device 坐标，需把逻辑鼠标坐标 × SCALE
+        if (ctx.isPointInPath(mouse.x * SCALE, mouse.y * SCALE)) return b;
+      }
+      return null;
+    }
+
+    let started = false;
+    document.getElementById('btn-regen').addEventListener('click', drawSubdivision);
+
+    // 初始生成 + 启动下雨动画
+    drawSubdivision();
+    if (!started) { started = true; render(); }
+  </script>
+</body>
+</html>
